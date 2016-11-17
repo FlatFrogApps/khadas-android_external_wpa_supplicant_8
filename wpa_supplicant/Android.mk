@@ -32,6 +32,10 @@ ifeq ($(BOARD_WPA_SUPPLICANT_PRIVATE_LIB),)
 L_CFLAGS += -DANDROID_LIB_STUB
 endif
 
+ifeq ($(MULTI_WIFI_SUPPORT),true)
+L_CFLAGS += -DMULTI_WIFI_SUPPORT
+endif
+
 # Disable roaming in wpa_supplicant
 ifdef CONFIG_NO_ROAMING
 L_CFLAGS += -DCONFIG_NO_ROAMING
@@ -66,6 +70,7 @@ INCLUDES += $(LOCAL_PATH)/src/tls
 INCLUDES += $(LOCAL_PATH)/src/utils
 INCLUDES += $(LOCAL_PATH)/src/wps
 INCLUDES += system/security/keystore/include
+INCLUDES += $(LOCAL_PATH)../../../hardware/libhardware_legacy/include
 ifdef CONFIG_DRIVER_NL80211
 ifneq ($(wildcard external/libnl),)
 INCLUDES += external/libnl/include
@@ -1567,7 +1572,7 @@ ifeq ($(BOARD_WPA_SUPPLICANT_PRIVATE_LIB), true)
 LOCAL_STATIC_LIBRARIES += $(BOARD_WPA_SUPPLICANT_PRIVATE_LIB)
 endif
 
-LOCAL_SHARED_LIBRARIES := libc libcutils liblog
+LOCAL_SHARED_LIBRARIES := libc libcutils liblog libhardware_legacy
 ifdef CONFIG_EAP_PROXY
 LOCAL_STATIC_LIBRARIES += $(LIB_STATIC_EAP_PROXY)
 LOCAL_SHARED_LIBRARIES += $(LIB_SHARED_EAP_PROXY)

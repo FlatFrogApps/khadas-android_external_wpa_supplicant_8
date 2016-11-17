@@ -37,8 +37,8 @@
 #include "wps_supplicant.h"
 #include "p2p_supplicant.h"
 #include "wifi_display.h"
-
-
+#include "../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
+extern int  own_go_intent;
 /*
  * How many times to try to scan to find the GO before giving up on join
  * request.
@@ -5343,10 +5343,19 @@ int wpas_p2p_connect(struct wpa_supplicant *wpa_s, const u8 *peer_addr,
 	wpa_s->global->pending_p2ps_group = 0;
 	wpa_s->global->pending_p2ps_group_freq = 0;
 	wpa_s->p2ps_method_config_any = 0;
-
+#ifndef MULTI_WIFI_SUPPORT
 	if (go_intent < 0)
 		go_intent = wpa_s->conf->p2p_go_intent;
-
+#else
+	if (strncmp(get_wifi_vendor_name(), "rtl", 3) == 0)
+		go_intent = own_go_intent;
+	else {
+		if (own_go_intent >2)
+			go_intent = own_go_intent-2;
+		else
+			go_intent = 2;
+	}
+#endif
 	if (!auth)
 		wpa_s->p2p_long_listen = 0;
 

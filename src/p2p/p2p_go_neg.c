@@ -15,7 +15,7 @@
 #include "wps/wps_defs.h"
 #include "p2p_i.h"
 #include "p2p.h"
-
+int own_go_intent =0;
 
 static int p2p_go_det(u8 own_intent, u8 peer_value)
 {
@@ -765,6 +765,10 @@ void p2p_process_go_neg_req(struct p2p_data *p2p, const u8 *sa,
 		goto fail;
 #endif /* CONFIG_P2P_STRICT */
 	}
+	if ((*msg.go_intent >> 1) < P2P_MAX_GO_INTENT)
+		own_go_intent = (*msg.go_intent >> 1)+1;
+	else
+		own_go_intent = (*msg.go_intent >> 1)-1;
 
 	if (!msg.config_timeout) {
 		p2p_dbg(p2p, "Mandatory Configuration Timeout attribute missing from GO Negotiation Request");
