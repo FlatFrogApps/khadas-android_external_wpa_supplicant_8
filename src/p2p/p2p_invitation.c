@@ -13,7 +13,7 @@
 #include "common/wpa_ctrl.h"
 #include "p2p_i.h"
 #include "p2p.h"
-
+#include "../../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
 
 static struct wpabuf * p2p_build_invitation_req(struct p2p_data *p2p,
 						struct p2p_device *peer,
@@ -215,7 +215,19 @@ void p2p_process_invitation_req(struct p2p_data *p2p, const u8 *sa,
 			goto fail;
 		}
 	}
-
+#ifdef MULTI_WIFI_SUPPORT
+	else if (!dev->listen_freq && !dev->oper_freq && strncmp(get_wifi_vendor_name(), "rtl",3) == 0) {
+		/*
+		 * This may happen if the peer entry was added based on PD
+		 * Request and no Probe Request/Response frame has been received
+		 * from this peer (or that information has timed out).
+		 */
+		p2p_dbg(p2p, "Update peer " MACSTR
+			" based on GO Invitation Req since listen/oper freq not known",
+			MAC2STR(dev->info.p2p_device_addr));
+		p2p_add_dev_info(p2p, sa, dev, &msg);
+	}
+#endif
 	if (!msg.group_id || !msg.channel_list) {
 		p2p_dbg(p2p, "Mandatory attribute missing in Invitation Request from "
 			MACSTR, MAC2STR(sa));

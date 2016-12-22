@@ -17,7 +17,7 @@
 #include "common/qca-vendor.h"
 #include "common/qca-vendor-attr.h"
 #include "driver_nl80211.h"
-
+#include "../../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
 
 static int protocol_feature_handler(struct nl_msg *msg, void *arg)
 {
@@ -554,6 +554,11 @@ static int wiphy_info_handler(struct nl_msg *msg, void *arg)
 	if (tb[NL80211_ATTR_DEVICE_AP_SME])
 		info->device_ap_sme = 1;
 
+#ifdef MULTI_WIFI_SUPPORT
+	if (strncmp(get_wifi_vendor_name(), "rtl",3) == 0)
+		info->device_ap_sme = 1;
+#endif
+
 	wiphy_info_feature_flags(info, tb[NL80211_ATTR_FEATURE_FLAGS]);
 	wiphy_info_ext_feature_flags(info, tb[NL80211_ATTR_EXT_FEATURES]);
 	wiphy_info_probe_resp_offload(capa,
@@ -945,6 +950,11 @@ int wpa_driver_nl80211_capa(struct wpa_driver_nl80211_data *drv)
 	 * to have everything we need to not need monitor interfaces.
 	 */
 	drv->use_monitor = !info.poll_command_supported || !info.data_tx_status;
+
+#ifdef MULTI_WIFI_SUPPORT
+    if (strncmp(get_wifi_vendor_name(), "rtl",3) == 0)
+		drv->use_monitor = 0;
+#endif
 
 	if (drv->device_ap_sme && drv->use_monitor) {
 		/*

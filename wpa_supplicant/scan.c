@@ -23,7 +23,7 @@
 #include "bss.h"
 #include "scan.h"
 #include "mesh.h"
-
+#include "../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
 
 static void wpa_supplicant_gen_assoc_event(struct wpa_supplicant *wpa_s)
 {
@@ -1701,11 +1701,22 @@ static int wpa_scan_result_compar(const void *a, const void *b)
 	int snr_a, snr_b, snr_a_full, snr_b_full;
 
 	/* WPA/WPA2 support preferred */
-	wpa_a = wpa_scan_get_vendor_ie(wa, WPA_IE_VENDOR_TYPE) != NULL ||
+#ifdef MULTI_WIFI_SUPPORT
+    if (strncmp(get_wifi_vendor_name(), "rtl",3) == 0) {
+		wpa_a = wpa_scan_get_ie(wa, WLAN_EID_RSN) != NULL;
+		wpa_b = wpa_scan_get_ie(wb, WLAN_EID_RSN) != NULL;
+	} else {
+		wpa_a = wpa_scan_get_vendor_ie(wa, WPA_IE_VENDOR_TYPE) != NULL ||
 		wpa_scan_get_ie(wa, WLAN_EID_RSN) != NULL;
-	wpa_b = wpa_scan_get_vendor_ie(wb, WPA_IE_VENDOR_TYPE) != NULL ||
+		wpa_b = wpa_scan_get_vendor_ie(wb, WPA_IE_VENDOR_TYPE) != NULL ||
 		wpa_scan_get_ie(wb, WLAN_EID_RSN) != NULL;
-
+	}
+#else
+	wpa_a = wpa_scan_get_vendor_ie(wa, WPA_IE_VENDOR_TYPE) != NULL ||
+	wpa_scan_get_ie(wa, WLAN_EID_RSN) != NULL;
+	wpa_b = wpa_scan_get_vendor_ie(wb, WPA_IE_VENDOR_TYPE) != NULL ||
+	wpa_scan_get_ie(wb, WLAN_EID_RSN) != NULL;
+#endif
 	if (wpa_b && !wpa_a)
 		return 1;
 	if (!wpa_b && wpa_a)

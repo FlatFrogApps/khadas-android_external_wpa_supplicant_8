@@ -39,6 +39,7 @@
 #include "driver_nl80211.h"
 #include "android_drv.h"
 #include "../../wpa_supplicant/wpa_supplicant_i.h"
+#include "../../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
 #ifndef CONFIG_LIBNL20
 /*
  * libnl 1.1 has a bug, it tries to allocate socket numbers densely
@@ -9115,6 +9116,15 @@ int wpa_driver_nl80211_driver_cmd(void *priv, char *cmd, char *buf,
 						" cmd (%s)", bss->ifname, cmd);
 		}
 	}
+#ifdef MULTI_WIFI_SUPPORT
+	if (strcmp(get_wifi_vendor_name(), "mtk7668") == 0) {
+		if (os_strncasecmp(cmd, "BTCOEXMODE", 10) == 0 ||
+			os_strncasecmp(cmd, "WLS_BATCHING", 12) == 0 || os_strcasecmp(cmd, "BTCOEXSCAN-STOP") == 0 ||
+			os_strncasecmp(cmd, "RXFILTER", 8) == 0 || os_strncasecmp(cmd, "SETSUSPENDMODE", 14) == 0 ||
+			os_strncasecmp(cmd, "SETBAND", 7) == 0)
+			return 0;
+	}
+#endif
 	if (os_strcasecmp(cmd, "STOP") == 0) {
 		linux_set_iface_flags(drv->global->ioctl_sock, bss->ifname, 0);
 		wpa_msg(drv->ctx, MSG_INFO, WPA_EVENT_DRIVER_STATE "STOPPED");

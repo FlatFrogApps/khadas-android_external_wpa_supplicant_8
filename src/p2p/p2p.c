@@ -19,7 +19,7 @@
 #include "wps/wps_i.h"
 #include "p2p_i.h"
 #include "p2p.h"
-
+#include "../../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
 
 static void p2p_state_timeout(void *eloop_ctx, void *timeout_ctx);
 static void p2p_device_free(struct p2p_data *p2p, struct p2p_device *dev);
@@ -94,6 +94,15 @@ void p2p_expire_peers(struct p2p_data *p2p)
 			os_get_reltime(&dev->last_seen);
 			continue;
 		}
+#ifdef MULTI_WIFI_SUPPORT
+		if (dev->req_config_methods != 0 && strncmp(get_wifi_vendor_name(), "rtl",3) == 0) {
+			/*
+			 * The peer is doing P2P-PROV-DISC
+			 * So do not expire the peer entry.
+			 */
+			continue;
+		}
+#endif
 
 		p2p_dbg(p2p, "Expiring old peer entry " MACSTR,
 			MAC2STR(dev->info.p2p_device_addr));
