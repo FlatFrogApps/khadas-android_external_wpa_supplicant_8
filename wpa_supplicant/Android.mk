@@ -36,6 +36,14 @@ ifeq ($(BOARD_WIFI_VENDOR),realtek)
 L_CFLAGS += -DBOARD_WIFI_REALTEK
 endif
 
+ifeq ($(BOARD_WIFI_VENDOR),icomm)
+L_CFLAGS += -DBOARD_WIFI_ICOMM
+endif
+
+ifeq ($(MULTI_WIFI_SUPPORT), true)
+L_CFLAGS += -DMULTI_WIFI_SUPPORT
+endif
+
 # Disable roaming in wpa_supplicant
 ifdef CONFIG_NO_ROAMING
 L_CFLAGS += -DCONFIG_NO_ROAMING

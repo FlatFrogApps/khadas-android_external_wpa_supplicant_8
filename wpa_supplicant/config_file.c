@@ -452,6 +452,25 @@ struct wpa_config * wpa_config_read(const char *name, struct wpa_config *cfgp)
 	}
 
 	fclose(f);
+#ifdef MULTI_WIFI_SUPPORT
+	if ((strstr(name , "p2p_supplicant_overlay.conf")) && (strncmp(get_wifi_vendor_name(), "ssv", 3) == 0)) {
+		wpa_printf(MSG_INFO, "add p2p_no_group_iface for icomm wifi");
+		if (wpa_config_process_global(config, "p2p_no_group_iface=1", 1) < 0)
+			wpa_printf(MSG_ERROR, "cannot add p2p_no_group_iface for icomm wifi");
+		if (wpa_config_process_global(config, "p2p_go_intent=12", 1) < 0)
+			wpa_printf(MSG_ERROR, "cannot set p2p_go_intent for icomm wifi");
+	}
+#endif
+
+#ifdef BOARD_WIFI_ICOMM
+	if ((strstr(name , "p2p_supplicant_overlay.conf"))) {
+		wpa_printf(MSG_INFO, "add p2p_no_group_iface for icomm wifi");
+		if (wpa_config_process_global(config, "p2p_no_group_iface=1", 1) < 0)
+			wpa_printf(MSG_ERROR, "cannot add p2p_no_group_iface for icomm wifi");
+		if (wpa_config_process_global(config, "p2p_go_intent=12", 1) < 0)
+			wpa_printf(MSG_ERROR, "cannot set p2p_go_intent for icomm wifi");
+	}
+#endif
 
 	config->ssid = head;
 	wpa_config_debug_dump_networks(config);
