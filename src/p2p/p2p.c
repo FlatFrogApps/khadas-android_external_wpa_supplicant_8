@@ -20,6 +20,9 @@
 #include "p2p_i.h"
 #include "p2p.h"
 #include "../../../../hardware/libhardware_legacy/include/hardware_legacy/wifi.h"
+#ifdef ANDROID
+#include <cutils/properties.h>
+#endif /* ANDROID */
 
 static void p2p_state_timeout(void *eloop_ctx, void *timeout_ctx);
 static void p2p_device_free(struct p2p_data *p2p, struct p2p_device *dev);
@@ -1765,16 +1768,38 @@ void p2p_add_dev_info(struct p2p_data *p2p, const u8 *addr,
 
 void p2p_build_ssid(struct p2p_data *p2p, u8 *ssid, size_t *ssid_len)
 {
+	char str[PROPERTY_VALUE_MAX];
+	char *tmp;
+	int val = 0;
+	if (property_get("sys.wifi.rsdb.enable", str, "0")) {
+		val = atoi(str);
+	}
+
+	if (val == 1) {
+		memset(str, 0, sizeof(str));
+		if (property_get("persist.sys.wifi.rsdb.name", str, "AndroidAP")) {
+			os_memcpy(ssid, str, p2p->cfg->ssid_postfix_len-1);
+			*ssid_len = p2p->cfg->ssid_postfix_len-1;
+		}
+	} else {
 	os_memcpy(ssid, P2P_WILDCARD_SSID, P2P_WILDCARD_SSID_LEN);
 	p2p_random((char *) &ssid[P2P_WILDCARD_SSID_LEN], 2);
 	os_memcpy(&ssid[P2P_WILDCARD_SSID_LEN + 2],
 		  p2p->cfg->ssid_postfix, p2p->cfg->ssid_postfix_len);
 	*ssid_len = P2P_WILDCARD_SSID_LEN + 2 + p2p->cfg->ssid_postfix_len;
+	}
 }
 
 
 int p2p_go_params(struct p2p_data *p2p, struct p2p_go_neg_results *params)
 {
+    char str[PROPERTY_VALUE_MAX];
+	int val = 0;
+	memset(str, 0, sizeof(str));
+	if (property_get("sys.wifi.rsdb.enable", str, "0")) {
+		val = atoi(str);
+	}
+	p2p_err(p2p, "sys.wifi.rsdb.enable = %d", val);
 	if (p2p->ssid_set) {
 		os_memcpy(params->ssid, p2p->ssid, p2p->ssid_len);
 		params->ssid_len = p2p->ssid_len;
@@ -1783,7 +1808,16 @@ int p2p_go_params(struct p2p_data *p2p, struct p2p_go_neg_results *params)
 	}
 	p2p->ssid_set = 0;
 
-	p2p_random(params->passphrase, p2p->cfg->passphrase_len);
+	if (val == 1) {
+		memset(str, 0, sizeof(str));
+		 if (property_get("persist.sys.wifi.rsdb.passwd", str, "12345678")) {
+			strcpy(params->passphrase,str);
+		 } else {
+			strcpy(params->passphrase,"12345678");
+		 }
+	} else {
+		p2p_random(params->passphrase, p2p->cfg->passphrase_len);
+	}
 	return 0;
 }
 
