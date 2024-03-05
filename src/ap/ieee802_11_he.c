@@ -29,17 +29,19 @@ static u8 ieee80211_he_ppet_size(u8 ppe_thres_hdr, const u8 *phy_cap_info)
 
 	ru = (ppe_thres_hdr >> HE_PPE_THRES_RU_INDEX_BITMASK_SHIFT) &
 		HE_PPE_THRES_RU_INDEX_BITMASK_MASK;
+	/* Count the number of 1 bits in RU Index Bitmask */
 	while (ru) {
 		if (ru & 0x1)
 			sz++;
 		ru >>= 1;
 	}
 
+	/* fixed header of 3 (NSTS) + 4 (RU Index Bitmask) = 7 bits */
+	/* 6 * (NSTS + 1) bits for bit 1 in RU Index Bitmask */
 	sz *= 1 + (ppe_thres_hdr & HE_PPE_THRES_NSS_MASK);
 	sz = (sz * 6) + 7;
-	if (sz % 8)
-		sz += 8;
-	sz /= 8;
+	/* PPE Pad to count the number of needed full octets */
+	sz = (sz + 7) / 8;
 
 	return sz;
 }
@@ -64,6 +66,7 @@ static int ieee80211_invalid_he_cap_size(const u8 *buf, size_t len)
 {
 	struct ieee80211_he_capabilities *cap;
 	size_t cap_len;
+	u8 ppe_thres_hdr;
 
 	cap = (struct ieee80211_he_capabilities *) buf;
 	cap_len = sizeof(*cap) - sizeof(cap->optional);
@@ -74,9 +77,11 @@ static int ieee80211_invalid_he_cap_size(const u8 *buf, size_t len)
 	if (len < cap_len)
 		return 1;
 
-	cap_len += ieee80211_he_ppet_size(buf[cap_len], cap->he_phy_capab_info);
+	ppe_thres_hdr = len > cap_len ? buf[cap_len] : 0xff;
+	cap_len += ieee80211_he_ppet_size(ppe_thres_hdr,
+					  cap->he_phy_capab_info);
 
-	return len != cap_len;
+	return len < cap_len;
 }
 
 
@@ -97,19 +102,21 @@ u8 * hostapd_eid_he_capab(struct hostapd_data *hapd, u8 *eid,
 					   mode->he_capab[opmode].phy_cap);
 
 	switch (hapd->iface->conf->he_oper_chwidth) {
-	case CHANWIDTH_80P80MHZ:
+	case CONF_OPER_CHWIDTH_80P80MHZ:
 		he_oper_chwidth |=
 			HE_PHYCAP_CHANNEL_WIDTH_SET_80PLUS80MHZ_IN_5G;
 		mcs_nss_size += 4;
 		/* fall through */
-	case CHANWIDTH_160MHZ:
+	case CONF_OPER_CHWIDTH_160MHZ:
 		he_oper_chwidth |= HE_PHYCAP_CHANNEL_WIDTH_SET_160MHZ_IN_5G;
 		mcs_nss_size += 4;
 		/* fall through */
-	case CHANWIDTH_80MHZ:
-	case CHANWIDTH_USE_HT:
+	case CONF_OPER_CHWIDTH_80MHZ:
+	case CONF_OPER_CHWIDTH_USE_HT:
 		he_oper_chwidth |= HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_IN_2G |
 			HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G;
+		break;
+	default:
 		break;
 	}
 
@@ -192,7 +199,11 @@ u8 * hostapd_eid_he_operation(struct hostapd_data *hapd, u8 *eid)
 		params |= (hapd->iface->conf->he_op.he_rts_threshold <<
 			   HE_OPERATION_RTS_THRESHOLD_OFFSET);
 
-	if (hapd->iface->conf->he_op.he_bss_color_disabled)
+	if (hapd->iface->conf->he_op.he_er_su_disable)
+		params |= HE_OPERATION_ER_SU_DISABLE;
+
+	if (hapd->iface->conf->he_op.he_bss_color_disabled ||
+	    hapd->cca_in_progress)
 		params |= HE_OPERATION_BSS_COLOR_DISABLED;
 	if (hapd->iface->conf->he_op.he_bss_color_partial)
 		params |= HE_OPERATION_BSS_COLOR_PARTIAL;
@@ -208,24 +219,62 @@ u8 * hostapd_eid_he_operation(struct hostapd_data *hapd, u8 *eid)
 	pos += 6; /* skip the fixed part */
 
 	if (is_6ghz_op_class(hapd->iconf->op_class)) {
-		u8 seg0 = hostapd_get_oper_centr_freq_seg0_idx(hapd->iconf);
+		enum oper_chan_width oper_chwidth =
+			hostapd_get_oper_chwidth(hapd->iconf);
+		u8 seg0 = hapd->iconf->he_oper_centr_freq_seg0_idx;
 		u8 seg1 = hostapd_get_oper_centr_freq_seg1_idx(hapd->iconf);
+		u8 control;
+
+#ifdef CONFIG_IEEE80211BE
+		if (hapd->iconf->punct_bitmap) {
+			punct_update_legacy_bw(hapd->iconf->punct_bitmap,
+					       hapd->iconf->channel,
+					       &oper_chwidth, &seg0, &seg1);
+		}
+#endif /* CONFIG_IEEE80211BE */
 
 		if (!seg0)
 			seg0 = hapd->iconf->channel;
 
 		params |= HE_OPERATION_6GHZ_OPER_INFO;
 
-		/* 6 GHz Operation Information field */
+		/* 6 GHz Operation Information field
+		 * IEEE Std 802.11ax-2021, 9.4.2.249 HE Operation element,
+		 * Figure 9-788k
+		 */
 		*pos++ = hapd->iconf->channel; /* Primary Channel */
 
-		/* Control: Channel Width */
+		/* Control:
+		 *	bits 0-1: Channel Width
+		 *	bit 2: Duplicate Beacon
+		 *	bits 3-5: Regulatory Info
+		 */
+		/* Channel Width */
 		if (seg1)
-			*pos++ = 3;
+			control = 3;
 		else
-			*pos++ = center_idx_to_bw_6ghz(seg0);
+			control = center_idx_to_bw_6ghz(seg0);
+		if (hapd->iconf->he_6ghz_reg_pwr_type == 1)
+			control |= HE_6GHZ_STANDARD_POWER_AP <<
+				HE_6GHZ_OPER_INFO_CTRL_REG_INFO_SHIFT;
+		else
+			control |= HE_6GHZ_INDOOR_AP <<
+				HE_6GHZ_OPER_INFO_CTRL_REG_INFO_SHIFT;
+		*pos++ = control;
 
 		/* Channel Center Freq Seg0/Seg1 */
+		if (oper_chwidth == 2) {
+			/*
+			 * Seg 0 indicates the channel center frequency index of
+			 * the 160 MHz channel.
+			 */
+			seg1 = seg0;
+			if (hapd->iconf->channel < seg0)
+				seg0 -= 8;
+			else
+				seg0 += 8;
+		}
+
 		*pos++ = seg0;
 		*pos++ = seg1;
 		/* Minimum Rate */
@@ -304,6 +353,11 @@ u8 * hostapd_eid_spatial_reuse(struct hostapd_data *hapd, u8 *eid)
 	if (spr->sr_ctrl & SPATIAL_REUSE_SRG_INFORMATION_PRESENT) {
 		*spr_param++ = hapd->iface->conf->spr.srg_obss_pd_min_offset;
 		*spr_param++ = hapd->iface->conf->spr.srg_obss_pd_max_offset;
+		os_memcpy(spr_param,
+			  hapd->iface->conf->spr.srg_bss_color_bitmap, 8);
+		spr_param += 8;
+		os_memcpy(spr_param,
+			  hapd->iface->conf->spr.srg_partial_bssid_bitmap, 8);
 		pos += 18;
 	}
 
@@ -313,46 +367,38 @@ u8 * hostapd_eid_spatial_reuse(struct hostapd_data *hapd, u8 *eid)
 
 u8 * hostapd_eid_he_6ghz_band_cap(struct hostapd_data *hapd, u8 *eid)
 {
+	struct hostapd_config *conf = hapd->iface->conf;
 	struct hostapd_hw_modes *mode = hapd->iface->current_mode;
+	struct he_capabilities *he_cap;
 	struct ieee80211_he_6ghz_band_cap *cap;
-	u32 vht_cap;
-	u8 ht_info;
-	u8 params;
+	u16 capab;
 	u8 *pos;
 
-	if (!mode || !is_6ghz_op_class(hapd->iconf->op_class))
+	if (!mode || !is_6ghz_op_class(hapd->iconf->op_class) ||
+	    !is_6ghz_freq(hapd->iface->freq))
 		return eid;
 
-	vht_cap = hapd->iface->conf->vht_capab;
-	ht_info = mode->a_mpdu_params;
+	he_cap = &mode->he_capab[IEEE80211_MODE_AP];
+	capab = he_cap->he_6ghz_capa & HE_6GHZ_BAND_CAP_MIN_MPDU_START;
+	capab |= (conf->he_6ghz_max_ampdu_len_exp <<
+		  HE_6GHZ_BAND_CAP_MAX_AMPDU_LEN_EXP_SHIFT) &
+		HE_6GHZ_BAND_CAP_MAX_AMPDU_LEN_EXP_MASK;
+	capab |= (conf->he_6ghz_max_mpdu <<
+		  HE_6GHZ_BAND_CAP_MAX_MPDU_LEN_SHIFT) &
+		HE_6GHZ_BAND_CAP_MAX_MPDU_LEN_MASK;
+	capab |= HE_6GHZ_BAND_CAP_SMPS_DISABLED;
+	if (conf->he_6ghz_rx_ant_pat)
+		capab |= HE_6GHZ_BAND_CAP_RX_ANTPAT_CONS;
+	if (conf->he_6ghz_tx_ant_pat)
+		capab |= HE_6GHZ_BAND_CAP_TX_ANTPAT_CONS;
 
 	pos = eid;
 	*pos++ = WLAN_EID_EXTENSION;
 	*pos++ = 1 + sizeof(*cap);
 	*pos++ = WLAN_EID_EXT_HE_6GHZ_BAND_CAP;
 
-	/* Minimum MPDU Start Spacing B0..B2 */
-	params = (ht_info >> 2) & HE_6GHZ_BAND_CAP_MIN_MPDU_START_SPACE_MASK;
-
-	/* Maximum A-MPDU Length Exponent B3..B5 */
-	params |= ((((vht_cap & VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MAX) >>
-		     VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MAX_SHIFT) &
-		    HE_6GHZ_BAND_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK) <<
-		   HE_6GHZ_BAND_CAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT);
-
-	/* Maximum MPDU Length B6..B7 */
-	params |= ((((vht_cap & VHT_CAP_MAX_MPDU_LENGTH_MASK) >>
-		     VHT_CAP_MAX_MPDU_LENGTH_MASK_SHIFT) &
-		    HE_6GHZ_BAND_CAP_MAX_MPDU_LENGTH_MASK) <<
-		   HE_6GHZ_BAND_CAP_MAX_MPDU_LENGTH_SHIFT);
-
 	cap = (struct ieee80211_he_6ghz_band_cap *) pos;
-	cap->a_mpdu_params = params;
-	cap->info = HE_6GHZ_BAND_CAP_SMPS_DISABLED;
-	if (vht_cap & VHT_CAP_RX_ANTENNA_PATTERN)
-		cap->info |= HE_6GHZ_BAND_CAP_RX_ANTENNA_PATTERN;
-	if (vht_cap & VHT_CAP_TX_ANTENNA_PATTERN)
-		cap->info |= HE_6GHZ_BAND_CAP_TX_ANTENNA_PATTERN;
+	cap->capab = host_to_le16(capab);
 	pos += sizeof(*cap);
 
 	return pos;
@@ -396,10 +442,10 @@ static int check_valid_he_mcs(struct hostapd_data *hapd, const u8 *sta_he_capab,
 	 * band/stream cases.
 	 */
 	switch (hapd->iface->conf->he_oper_chwidth) {
-	case CHANWIDTH_80P80MHZ:
+	case CONF_OPER_CHWIDTH_80P80MHZ:
 		mcs_count = 3;
 		break;
-	case CHANWIDTH_160MHZ:
+	case CONF_OPER_CHWIDTH_160MHZ:
 		mcs_count = 2;
 		break;
 	default:
@@ -437,7 +483,8 @@ u16 copy_sta_he_capab(struct hostapd_data *hapd, struct sta_info *sta,
 		      enum ieee80211_op_mode opmode, const u8 *he_capab,
 		      size_t he_capab_len)
 {
-	if (!he_capab || !hapd->iconf->ieee80211ax ||
+	if (!he_capab || !(sta->flags & WLAN_STA_WMM) ||
+	    !hapd->iconf->ieee80211ax || hapd->conf->disable_11ax ||
 	    !check_valid_he_mcs(hapd, he_capab, opmode) ||
 	    ieee80211_invalid_he_cap_size(he_capab, he_capab_len) ||
 	    he_capab_len > sizeof(struct ieee80211_he_capabilities)) {
@@ -467,6 +514,7 @@ u16 copy_sta_he_6ghz_capab(struct hostapd_data *hapd, struct sta_info *sta,
 			   const u8 *he_6ghz_capab)
 {
 	if (!he_6ghz_capab || !hapd->iconf->ieee80211ax ||
+	    hapd->conf->disable_11ax ||
 	    !is_6ghz_op_class(hapd->iconf->op_class)) {
 		sta->flags &= ~WLAN_STA_6GHZ;
 		os_free(sta->he_6ghz_capab);
@@ -495,10 +543,28 @@ int hostapd_get_he_twt_responder(struct hostapd_data *hapd,
 	u8 *mac_cap;
 
 	if (!hapd->iface->current_mode ||
-	    !hapd->iface->current_mode->he_capab[mode].he_supported)
+	    !hapd->iface->current_mode->he_capab[mode].he_supported ||
+	    !hapd->iconf->ieee80211ax || hapd->conf->disable_11ax)
 		return 0;
 
 	mac_cap = hapd->iface->current_mode->he_capab[mode].mac_cap;
 
-	return !!(mac_cap[HE_MAC_CAPAB_0] & HE_MACCAP_TWT_RESPONDER);
+	return !!(mac_cap[HE_MAC_CAPAB_0] & HE_MACCAP_TWT_RESPONDER) &&
+		hapd->iface->conf->he_op.he_twt_responder;
+}
+
+
+u8 * hostapd_eid_cca(struct hostapd_data *hapd, u8 *eid)
+{
+	if (!hapd->cca_in_progress)
+		return eid;
+
+	/* BSS Color Change Announcement element */
+	*eid++ = WLAN_EID_EXTENSION;
+	*eid++ = 3;
+	*eid++ = WLAN_EID_EXT_COLOR_CHANGE_ANNOUNCEMENT;
+	*eid++ = hapd->cca_count; /* Color Switch Countdown */
+	*eid++ = hapd->cca_color; /* New BSS Color Information */
+
+	return eid;
 }

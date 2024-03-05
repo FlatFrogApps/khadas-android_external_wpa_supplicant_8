@@ -94,6 +94,11 @@ int eap_server_tls_ssl_init(struct eap_sm *sm, struct eap_ssl_data *data,
 		if (data->tls_out_limit > 100)
 			data->tls_out_limit -= 100;
 	}
+
+#ifdef CONFIG_TESTING_OPTIONS
+	data->skip_prot_success = sm->cfg->skip_prot_success;
+#endif /* CONFIG_TESTING_OPTIONS */
+
 	return 0;
 }
 
@@ -146,10 +151,10 @@ u8 * eap_server_tls_derive_session_id(struct eap_sm *sm,
 {
 	struct tls_random keys;
 	u8 *out;
-	const u8 context[] = { EAP_TYPE_TLS };
 
-	if (eap_type == EAP_TYPE_TLS && data->tls_v13) {
+	if (data->tls_v13) {
 		u8 *id, *method_id;
+		const u8 context[] = { eap_type };
 
 		/* Session-Id = <EAP-Type> || Method-Id
 		 * Method-Id = TLS-Exporter("EXPORTER_EAP_TLS_Method-Id",
@@ -365,6 +370,63 @@ int eap_server_tls_phase1(struct eap_sm *sm, struct eap_ssl_data *data)
 	    tls_connection_established(sm->cfg->ssl_ctx, data->conn))
 		sm->serial_num = tls_connection_peer_serial_num(
 			sm->cfg->ssl_ctx, data->conn);
+
+	/*
+	 * RFC 9190 Section 2.5
+	 *
+	 * We need to signal the other end that TLS negotiation is done. We
+	 * can't send a zero-length application data message, so we send
+	 * application data which is one byte of zero.
+	 *
+	 * Note this is only done for when there is no application data to be
+	 * sent. So this is done always for EAP-TLS but notably not for PEAP
+	 * even on resumption.
+	 */
+	if (data->tls_v13 &&
+	    tls_connection_established(sm->cfg->ssl_ctx, data->conn)) {
+		struct wpabuf *plain, *encr;
+
+		switch (sm->currentMethod) {
+		case EAP_TYPE_PEAP:
+			break;
+		default:
+			if (!tls_connection_resumed(sm->cfg->ssl_ctx,
+						    data->conn))
+				break;
+			/* fallthrough */
+		case EAP_TYPE_TLS:
+#ifdef CONFIG_TESTING_OPTIONS
+			if (data->skip_prot_success) {
+				wpa_printf(MSG_INFO,
+					   "TESTING: Do not send protected success indication");
+				break;
+			}
+#endif /* CONFIG_TESTING_OPTIONS */
+			wpa_printf(MSG_DEBUG,
+				   "EAP-TLS: Send protected success indication (appl data 0x00)");
+
+			plain = wpabuf_alloc(1);
+			if (!plain)
+				return -1;
+			wpabuf_put_u8(plain, 0);
+			encr = eap_server_tls_encrypt(sm, data, plain);
+			wpabuf_free(plain);
+			if (!encr)
+				return -1;
+			if (wpabuf_resize(&data->tls_out, wpabuf_len(encr)) < 0)
+			{
+				wpa_printf(MSG_INFO,
+					   "EAP-TLS: Failed to resize output buffer");
+				wpabuf_free(encr);
+				return -1;
+			}
+			wpabuf_put_buf(data->tls_out, encr);
+			wpa_hexdump_buf(MSG_DEBUG,
+					"EAP-TLS: Data appended to the message",
+					encr);
+			wpabuf_free(encr);
+		}
+	}
 
 	return 0;
 }

@@ -82,7 +82,8 @@ static int nl80211_get_noise_for_scan_results(
 
 	os_memset(info, 0, sizeof(*info));
 	msg = nl80211_drv_msg(drv, NLM_F_DUMP, NL80211_CMD_GET_SURVEY);
-	return send_and_recv_msgs(drv, msg, get_noise_for_scan_results, info);
+	return send_and_recv_msgs(drv, msg, get_noise_for_scan_results, info,
+				  NULL, NULL);
 }
 
 
@@ -94,7 +95,7 @@ static int nl80211_abort_scan(struct i802_bss *bss)
 
 	wpa_printf(MSG_DEBUG, "nl80211: Abort scan");
 	msg = nl80211_cmd_msg(bss, 0, NL80211_CMD_ABORT_SCAN);
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "nl80211: Abort scan failed: ret=%d (%s)",
 			   ret, strerror(-ret));
@@ -125,7 +126,7 @@ static int nl80211_abort_vendor_scan(struct wpa_driver_nl80211_data *drv,
 
 	nla_nest_end(msg, params);
 
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 	msg = NULL;
 	if (ret) {
 		wpa_printf(MSG_INFO,
@@ -202,6 +203,21 @@ nl80211_scan_common(struct i802_bss *bss, u8 cmd,
 				goto fail;
 		}
 		nla_nest_end(msg, ssids);
+
+		/*
+		 * If allowed, scan for 6 GHz APs that are reported by other
+		 * APs. Note that if the flag is not set and 6 GHz channels are
+		 * to be scanned, it is highly likely that non-PSC channels
+		 * would be scanned passively (due to the Probe Request frame
+		 * transmission restrictions mandated in IEEE Std 802.11ax-2021,
+		 * 26.17.2.3 (Scanning in the 6 GHz band). Passive scanning of
+		 * all non-PSC channels would take a significant amount of time.
+		 */
+		if (!params->non_coloc_6ghz) {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: Scan co-located APs on 6 GHz");
+			scan_flags |= NL80211_SCAN_FLAG_COLOCATED_6GHZ;
+		}
 	} else {
 		wpa_printf(MSG_DEBUG, "nl80211: Passive scan requested");
 	}
@@ -365,7 +381,7 @@ int wpa_driver_nl80211_scan(struct i802_bss *bss,
 			goto fail;
 	}
 
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 	msg = NULL;
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "nl80211: Scan trigger failed: ret=%d "
@@ -396,7 +412,7 @@ int wpa_driver_nl80211_scan(struct i802_bss *bss,
 	drv->scan_state = SCAN_REQUESTED;
 	/* Not all drivers generate "scan completed" wireless event, so try to
 	 * read results after a timeout. */
-	timeout = 10;
+	timeout = drv->uses_6ghz ? 15 : 10;
 	if (drv->scan_complete_events) {
 		/*
 		 * The driver seems to deliver events to notify when scan is
@@ -618,7 +634,7 @@ int wpa_driver_nl80211_sched_scan(void *priv,
 			params->sched_scan_start_delay))
 		goto fail;
 
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 
 	/* TODO: if we get an error here, we should fall back to normal scan */
 
@@ -655,7 +671,7 @@ int wpa_driver_nl80211_stop_sched_scan(void *priv)
 #endif /* ANDROID */
 
 	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_STOP_SCHED_SCAN);
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 	if (ret) {
 		wpa_printf(MSG_DEBUG,
 			   "nl80211: Sched scan stop failed: ret=%d (%s)",
@@ -712,6 +728,7 @@ nl80211_parse_bss_info(struct wpa_driver_nl80211_data *drv,
 		[NL80211_BSS_STATUS] = { .type = NLA_U32 },
 		[NL80211_BSS_SEEN_MS_AGO] = { .type = NLA_U32 },
 		[NL80211_BSS_BEACON_IES] = { .type = NLA_UNSPEC },
+		[NL80211_BSS_BEACON_TSF] = { .type = NLA_U64 },
 		[NL80211_BSS_PARENT_TSF] = { .type = NLA_U64 },
 		[NL80211_BSS_PARENT_BSSID] = { .type = NLA_UNSPEC },
 		[NL80211_BSS_LAST_SEEN_BOOTTIME] = { .type = NLA_U64 },
@@ -773,8 +790,10 @@ nl80211_parse_bss_info(struct wpa_driver_nl80211_data *drv,
 		r->tsf = nla_get_u64(bss[NL80211_BSS_TSF]);
 	if (bss[NL80211_BSS_BEACON_TSF]) {
 		u64 tsf = nla_get_u64(bss[NL80211_BSS_BEACON_TSF]);
-		if (tsf > r->tsf)
+		if (tsf > r->tsf) {
 			r->tsf = tsf;
+			r->beacon_newer = true;
+		}
 	}
 	if (bss[NL80211_BSS_SEEN_MS_AGO])
 		r->age = nla_get_u32(bss[NL80211_BSS_SEEN_MS_AGO]);
@@ -869,7 +888,7 @@ static void clear_state_mismatch(struct wpa_driver_nl80211_data *drv,
 		wpa_driver_nl80211_mlme(drv, addr,
 					NL80211_CMD_DEAUTHENTICATE,
 					WLAN_REASON_PREV_AUTH_NOT_VALID, 1,
-					get_connect_handle(drv->first_bss));
+					drv->first_bss);
 	}
 }
 
@@ -892,8 +911,21 @@ static void nl80211_check_bss_status(struct wpa_driver_nl80211_data *drv,
 			   "nl80211: Local state (associated with " MACSTR
 			   ") does not match with BSS state",
 			   MAC2STR(drv->bssid));
-		clear_state_mismatch(drv, r->bssid);
-		clear_state_mismatch(drv, drv->bssid);
+
+		if (os_memcmp(drv->sta_mlo_info.ap_mld_addr, drv->bssid,
+			      ETH_ALEN) != 0) {
+			clear_state_mismatch(drv, r->bssid);
+
+			if (!is_zero_ether_addr(drv->sta_mlo_info.ap_mld_addr))
+				clear_state_mismatch(
+					drv, drv->sta_mlo_info.ap_mld_addr);
+			else
+				clear_state_mismatch(drv, drv->bssid);
+
+		} else {
+			wpa_printf(MSG_DEBUG,
+				   "nl80211: BSSID is the MLD address");
+		}
 	}
 }
 
@@ -944,7 +976,7 @@ try_again:
 
 	arg.drv = drv;
 	arg.res = res;
-	ret = send_and_recv_msgs(drv, msg, bss_info_handler, &arg);
+	ret = send_and_recv_msgs(drv, msg, bss_info_handler, &arg, NULL, NULL);
 	if (ret == -EAGAIN) {
 		count++;
 		if (count >= 10) {
@@ -1028,7 +1060,8 @@ void nl80211_dump_scan(struct wpa_driver_nl80211_data *drv)
 	ctx.idx = 0;
 	msg = nl80211_cmd_msg(drv->first_bss, NLM_F_DUMP, NL80211_CMD_GET_SCAN);
 	if (msg)
-		send_and_recv_msgs(drv, msg, nl80211_dump_scan_handler, &ctx);
+		send_and_recv_msgs(drv, msg, nl80211_dump_scan_handler, &ctx,
+				   NULL, NULL);
 }
 
 
@@ -1221,7 +1254,8 @@ int wpa_driver_nl80211_vendor_scan(struct i802_bss *bss,
 
 	nla_nest_end(msg, attr);
 
-	ret = send_and_recv_msgs(drv, msg, scan_cookie_handler, &cookie);
+	ret = send_and_recv_msgs(drv, msg, scan_cookie_handler, &cookie,
+				 NULL, NULL);
 	msg = NULL;
 	if (ret) {
 		wpa_printf(MSG_DEBUG,
@@ -1284,7 +1318,7 @@ int nl80211_set_default_scan_ies(void *priv, const u8 *ies, size_t ies_len)
 
 	nla_nest_end(msg, attr);
 
-	ret = send_and_recv_msgs(drv, msg, NULL, NULL);
+	ret = send_and_recv_msgs(drv, msg, NULL, NULL, NULL, NULL);
 	msg = NULL;
 	if (ret) {
 		wpa_printf(MSG_ERROR,

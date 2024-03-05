@@ -64,7 +64,7 @@ struct eap_teap_data {
 	struct wpabuf *pending_phase2_resp;
 	struct wpabuf *server_outer_tlvs;
 	struct wpabuf *peer_outer_tlvs;
-	u8 *identity; /* from PAC-Opaque */
+	u8 *identity; /* from PAC-Opaque or client certificate */
 	size_t identity_len;
 	int eap_seq;
 	int tnc_started;
@@ -74,11 +74,15 @@ struct eap_teap_data {
 
 	enum teap_error_codes error_code;
 	enum teap_identity_types cur_id_type;
+
+	bool check_crypto_binding;
 };
 
 
 static int eap_teap_process_phase2_start(struct eap_sm *sm,
 					 struct eap_teap_data *data);
+static int eap_teap_phase2_init(struct eap_sm *sm, struct eap_teap_data *data,
+				int vendor, enum eap_type eap_type);
 
 
 static const char * eap_teap_state_txt(int state)
@@ -365,7 +369,9 @@ static void * eap_teap_init(struct eap_sm *sm)
 	data->teap_version = EAP_TEAP_VERSION;
 	data->state = START;
 
-	if (eap_server_tls_ssl_init(sm, &data->ssl, 0, EAP_TYPE_TEAP)) {
+	if (eap_server_tls_ssl_init(sm, &data->ssl,
+				    sm->cfg->eap_teap_auth == 2 ? 2 : 0,
+				    EAP_TYPE_TEAP)) {
 		wpa_printf(MSG_INFO, "EAP-TEAP: Failed to initialize SSL.");
 		eap_teap_reset(sm, data);
 		return NULL;
@@ -501,6 +507,19 @@ static int eap_teap_phase1_done(struct eap_sm *sm, struct eap_teap_data *data)
 	char cipher[64];
 
 	wpa_printf(MSG_DEBUG, "EAP-TEAP: Phase 1 done, starting Phase 2");
+
+	if (!data->identity && sm->cfg->eap_teap_auth == 2) {
+		const char *subject;
+
+		subject = tls_connection_get_peer_subject(data->ssl.conn);
+		if (subject) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-TEAP: Peer subject from Phase 1 client certificate: '%s'",
+				   subject);
+			data->identity = (u8 *) os_strdup(subject);
+			data->identity_len = os_strlen(subject);
+		}
+	}
 
 	data->tls_cs = tls_connection_get_cipher_suite(data->ssl.conn);
 	wpa_printf(MSG_DEBUG, "EAP-TEAP: TLS cipher suite 0x%04x",
@@ -689,6 +708,8 @@ static struct wpabuf * eap_teap_build_crypto_binding(
 	wpa_hexdump(MSG_MSGDUMP, "EAP-TEAP: MSK Compound MAC",
 		    cb->msk_compound_mac, sizeof(cb->msk_compound_mac));
 
+	data->check_crypto_binding = true;
+
 	return buf;
 }
 
@@ -874,6 +895,7 @@ static struct wpabuf * eap_teap_buildReq(struct eap_sm *sm, void *priv, u8 id)
 	struct eap_teap_data *data = priv;
 	struct wpabuf *req = NULL;
 	int piggyback = 0;
+	bool move_to_method = true;
 
 	if (data->ssl.state == FRAG_ACK) {
 		return eap_server_tls_build_ack(id, EAP_TYPE_TEAP,
@@ -925,6 +947,21 @@ static struct wpabuf * eap_teap_buildReq(struct eap_sm *sm, void *priv, u8 id)
 		break;
 	case CRYPTO_BINDING:
 		req = eap_teap_build_crypto_binding(sm, data);
+		if (req && sm->cfg->eap_teap_auth == 0 &&
+		    data->inner_eap_not_done &&
+		    !data->phase2_method &&
+		    sm->cfg->eap_teap_method_sequence == 0) {
+			wpa_printf(MSG_DEBUG,
+				   "EAP-TEAP: Continue with inner EAP authentication for second credential (optimized)");
+			eap_teap_state(data, PHASE2_ID);
+			if (eap_teap_phase2_init(sm, data, EAP_VENDOR_IETF,
+						 EAP_TYPE_IDENTITY) < 0) {
+				eap_teap_state(data, FAILURE);
+				wpabuf_free(req);
+				return NULL;
+			}
+			move_to_method = false;
+		}
 		if (data->phase2_method) {
 			/*
 			 * Include the start of the next EAP method in the
@@ -935,7 +972,8 @@ static struct wpabuf * eap_teap_buildReq(struct eap_sm *sm, void *priv, u8 id)
 
 			eap = eap_teap_build_phase2_req(sm, data, id);
 			req = wpabuf_concat(req, eap);
-			eap_teap_state(data, PHASE2_METHOD);
+			if (move_to_method)
+				eap_teap_state(data, PHASE2_METHOD);
 		}
 		break;
 	case REQUEST_PAC:
@@ -992,6 +1030,13 @@ static int eap_teap_phase2_init(struct eap_sm *sm, struct eap_teap_data *data,
 	data->phase2_method = eap_server_get_eap_method(vendor, eap_type);
 	if (!data->phase2_method)
 		return -1;
+
+	/* While RFC 7170 does not describe this, EAP-TEAP has been deployed
+	 * with implementations that use the EAP-FAST-MSCHAPv2, instead of the
+	 * EAP-MSCHAPv2, way of deriving the MSK for IMSK. Use that design here
+	 * to interoperate.
+	 */
+	sm->eap_fast_mschapv2 = true;
 
 	sm->init_phase2 = 1;
 	data->phase2_priv = data->phase2_method->init(sm);
@@ -1488,7 +1533,8 @@ static void eap_teap_process_phase2_tlvs(struct eap_sm *sm,
 					 struct wpabuf *in_data)
 {
 	struct eap_teap_tlv_parse tlv;
-	int check_crypto_binding = data->state == CRYPTO_BINDING;
+	bool check_crypto_binding = data->state == CRYPTO_BINDING ||
+		data->check_crypto_binding;
 
 	if (eap_teap_parse_tlvs(in_data, &tlv) < 0) {
 		wpa_printf(MSG_DEBUG,
@@ -1571,6 +1617,7 @@ static void eap_teap_process_phase2_tlvs(struct eap_sm *sm,
 
 		wpa_printf(MSG_DEBUG,
 			   "EAP-TEAP: Valid Crypto-Binding TLV received");
+		data->check_crypto_binding = false;
 		if (data->final_result) {
 			wpa_printf(MSG_DEBUG,
 				   "EAP-TEAP: Authentication completed successfully");
@@ -1649,7 +1696,8 @@ static void eap_teap_process_phase2_tlvs(struct eap_sm *sm,
 			   "EAP-TEAP: Continue with basic password authentication for second credential");
 		eap_teap_state(data, PHASE2_BASIC_AUTH);
 	} else if (check_crypto_binding && data->state == CRYPTO_BINDING &&
-		   sm->cfg->eap_teap_auth == 0 && data->inner_eap_not_done) {
+		   sm->cfg->eap_teap_auth == 0 && data->inner_eap_not_done &&
+		   sm->cfg->eap_teap_method_sequence == 1) {
 		wpa_printf(MSG_DEBUG,
 			   "EAP-TEAP: Continue with inner EAP authentication for second credential");
 		eap_teap_state(data, PHASE2_ID);
@@ -1775,9 +1823,10 @@ static int eap_teap_process_phase2_start(struct eap_sm *sm,
 			next_vendor = EAP_VENDOR_IETF;
 			next_type = EAP_TYPE_NONE;
 			eap_teap_state(data, PHASE2_METHOD);
-		} else if (sm->cfg->eap_teap_pac_no_inner) {
+		} else if (sm->cfg->eap_teap_pac_no_inner ||
+			sm->cfg->eap_teap_auth == 2) {
 			wpa_printf(MSG_DEBUG,
-				   "EAP-TEAP: Used PAC and identity already known - skip inner auth");
+				   "EAP-TEAP: Used PAC or client certificate and identity already known - skip inner auth");
 			data->skipped_inner_auth = 1;
 			/* FIX: Need to derive CMK here. However, how is that
 			 * supposed to be done? RFC 7170 does not tell that for

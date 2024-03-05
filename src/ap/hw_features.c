@@ -313,7 +313,7 @@ static void ieee80211n_check_scan(struct hostapd_iface *iface)
 {
 	struct wpa_scan_results *scan_res;
 	int oper40;
-	int res;
+	int res = 0;
 
 	/* Check list of neighboring BSSes (from scan) to see whether 40 MHz is
 	 * allowed per IEEE Std 802.11-2012, 10.15.3.2 */
@@ -349,12 +349,29 @@ static void ieee80211n_check_scan(struct hostapd_iface *iface)
 		}
 	}
 
-	res = ieee80211n_allowed_ht40_channel_pair(iface);
+#ifdef CONFIG_IEEE80211AX
+	if (iface->conf->secondary_channel &&
+	    iface->current_mode->mode == HOSTAPD_MODE_IEEE80211G &&
+	    iface->conf->ieee80211ax) {
+		struct he_capabilities *he_cap;
+
+		he_cap = &iface->current_mode->he_capab[IEEE80211_MODE_AP];
+		if (!(he_cap->phy_cap[HE_PHYCAP_CHANNEL_WIDTH_SET_IDX] &
+		      HE_PHYCAP_CHANNEL_WIDTH_SET_40MHZ_IN_2G)) {
+			wpa_printf(MSG_DEBUG,
+				   "HE: 40 MHz channel width is not supported in 2.4 GHz; clear secondary channel configuration");
+			iface->conf->secondary_channel = 0;
+		}
+	}
+#endif /* CONFIG_IEEE80211AX */
+
+	if (iface->conf->secondary_channel)
+		res = ieee80211n_allowed_ht40_channel_pair(iface);
 	if (!res) {
 		iface->conf->secondary_channel = 0;
 		hostapd_set_oper_centr_freq_seg0_idx(iface->conf, 0);
 		hostapd_set_oper_centr_freq_seg1_idx(iface->conf, 0);
-		hostapd_set_oper_chwidth(iface->conf, CHANWIDTH_USE_HT);
+		hostapd_set_oper_chwidth(iface->conf, CONF_OPER_CHWIDTH_USE_HT);
 		res = 1;
 		wpa_printf(MSG_INFO, "Fallback to 20 MHz");
 	}
@@ -732,6 +749,51 @@ int hostapd_check_edmg_capab(struct hostapd_iface *iface)
 }
 
 
+int hostapd_check_he_6ghz_capab(struct hostapd_iface *iface)
+{
+#ifdef CONFIG_IEEE80211AX
+	struct he_capabilities *he_cap;
+	u16 hw;
+
+	if (!iface->current_mode || !is_6ghz_freq(iface->freq))
+		return 0;
+
+	he_cap = &iface->current_mode->he_capab[IEEE80211_MODE_AP];
+	hw = he_cap->he_6ghz_capa;
+	if (iface->conf->he_6ghz_max_mpdu >
+	    ((hw & HE_6GHZ_BAND_CAP_MAX_MPDU_LEN_MASK) >>
+	     HE_6GHZ_BAND_CAP_MAX_MPDU_LEN_SHIFT)) {
+		wpa_printf(MSG_ERROR,
+			   "The driver does not support the configured HE 6 GHz Max MPDU length");
+		return -1;
+	}
+
+	if (iface->conf->he_6ghz_max_ampdu_len_exp >
+	    ((hw & HE_6GHZ_BAND_CAP_MAX_AMPDU_LEN_EXP_MASK) >>
+	     HE_6GHZ_BAND_CAP_MAX_AMPDU_LEN_EXP_SHIFT)) {
+		wpa_printf(MSG_ERROR,
+			   "The driver does not support the configured HE 6 GHz Max AMPDU Length Exponent");
+		return -1;
+	}
+
+	if (iface->conf->he_6ghz_rx_ant_pat &&
+	    !(hw & HE_6GHZ_BAND_CAP_RX_ANTPAT_CONS)) {
+		wpa_printf(MSG_ERROR,
+			   "The driver does not support the configured HE 6 GHz Rx Antenna Pattern");
+		return -1;
+	}
+
+	if (iface->conf->he_6ghz_tx_ant_pat &&
+	    !(hw & HE_6GHZ_BAND_CAP_TX_ANTPAT_CONS)) {
+		wpa_printf(MSG_ERROR,
+			   "The driver does not support the configured HE 6 GHz Tx Antenna Pattern");
+		return -1;
+	}
+#endif /* CONFIG_IEEE80211AX */
+	return 0;
+}
+
+
 static int hostapd_is_usable_chan(struct hostapd_iface *iface,
 				  int frequency, int primary)
 {
@@ -776,6 +838,8 @@ static int hostapd_is_usable_edmg(struct hostapd_iface *iface)
 				       iface->freq, NULL,
 				       iface->hw_features,
 				       iface->num_hw_features);
+	if (!pri_chan)
+		return 0;
 	hostapd_encode_edmg_chan(iface->conf->enable_edmg,
 				 iface->conf->edmg_channel,
 				 pri_chan->chan,
@@ -829,6 +893,55 @@ static int hostapd_is_usable_edmg(struct hostapd_iface *iface)
 }
 
 
+static bool hostapd_is_usable_punct_bitmap(struct hostapd_iface *iface)
+{
+#ifdef CONFIG_IEEE80211BE
+	struct hostapd_config *conf = iface->conf;
+	u8 bw, start_chan;
+
+	if (!conf->punct_bitmap)
+		return true;
+
+	if (!conf->ieee80211be) {
+		wpa_printf(MSG_ERROR,
+			   "Currently RU puncturing is supported only if ieee80211be is enabled");
+		return false;
+	}
+
+	if (iface->freq >= 2412 && iface->freq <= 2484) {
+		wpa_printf(MSG_ERROR,
+			   "RU puncturing not supported in 2.4 GHz");
+		return false;
+	}
+
+	switch (conf->eht_oper_chwidth) {
+	case 0:
+		wpa_printf(MSG_ERROR,
+			   "RU puncturing is supported only in 80 MHz and 160 MHz");
+		return false;
+	case 1:
+		bw = 80;
+		start_chan = conf->eht_oper_centr_freq_seg0_idx - 6;
+		break;
+	case 2:
+		bw = 160;
+		start_chan = conf->eht_oper_centr_freq_seg0_idx - 14;
+		break;
+	default:
+		return false;
+	}
+
+	if (!is_punct_bitmap_valid(bw, (conf->channel - start_chan) / 4,
+				   conf->punct_bitmap)) {
+		wpa_printf(MSG_ERROR, "Invalid puncturing bitmap");
+		return false;
+	}
+#endif /* CONFIG_IEEE80211BE */
+
+	return true;
+}
+
+
 static int hostapd_is_usable_chans(struct hostapd_iface *iface)
 {
 	int secondary_freq;
@@ -851,12 +964,21 @@ static int hostapd_is_usable_chans(struct hostapd_iface *iface)
 	if (!hostapd_is_usable_edmg(iface))
 		return 0;
 
+	if (!hostapd_is_usable_punct_bitmap(iface))
+		return 0;
+
 	if (!iface->conf->secondary_channel)
 		return 1;
 
 	if (hostapd_is_usable_chan(iface, iface->freq +
-				   iface->conf->secondary_channel * 20, 0))
-		return 1;
+				   iface->conf->secondary_channel * 20, 0)) {
+		if (iface->conf->secondary_channel == 1 &&
+		    (pri_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40P))
+			return 1;
+		if (iface->conf->secondary_channel == -1 &&
+		    (pri_chan->allowed_bw & HOSTAPD_CHAN_WIDTH_40M))
+			return 1;
+	}
 	if (!iface->conf->ht40_plus_minus_allowed)
 		return 0;
 
@@ -949,9 +1071,9 @@ static void hostapd_notify_bad_chans(struct hostapd_iface *iface)
 	hostapd_logger(iface->bss[0], NULL,
 		       HOSTAPD_MODULE_IEEE80211,
 		       HOSTAPD_LEVEL_WARNING,
-		       "Configured channel (%d) or frequency (%d) not found from the channel list of the current mode (%d) %s",
+		       "Configured channel (%d) or frequency (%d) (secondary_channel=%d) not found from the channel list of the current mode (%d) %s",
 		       iface->conf->channel,
-		       iface->freq,
+		       iface->freq, iface->conf->secondary_channel,
 		       iface->current_mode->mode,
 		       hostapd_hw_mode_txt(iface->current_mode->mode));
 	hostapd_logger(iface->bss[0], NULL, HOSTAPD_MODULE_IEEE80211,
@@ -1017,24 +1139,26 @@ int hostapd_select_hw_mode(struct hostapd_iface *iface)
 
 	if ((iface->conf->hw_mode == HOSTAPD_MODE_IEEE80211G ||
 	     iface->conf->ieee80211n || iface->conf->ieee80211ac ||
-	     iface->conf->ieee80211ax) &&
+	     iface->conf->ieee80211ax || iface->conf->ieee80211be) &&
 	    iface->conf->channel == 14) {
-		wpa_printf(MSG_INFO, "Disable OFDM/HT/VHT/HE on channel 14");
+		wpa_printf(MSG_INFO, "Disable OFDM/HT/VHT/HE/EHT on channel 14");
 		iface->conf->hw_mode = HOSTAPD_MODE_IEEE80211B;
 		iface->conf->ieee80211n = 0;
 		iface->conf->ieee80211ac = 0;
 		iface->conf->ieee80211ax = 0;
+		iface->conf->ieee80211be = 0;
 	}
 
 	iface->current_mode = NULL;
 	for (i = 0; i < iface->num_hw_features; i++) {
 		struct hostapd_hw_modes *mode = &iface->hw_features[i];
+		int chan;
+
 		if (mode->mode == iface->conf->hw_mode) {
 			if (iface->freq > 0 &&
-			    !hw_get_chan(mode->mode, iface->freq,
-					 iface->hw_features,
-					 iface->num_hw_features))
+			    !hw_mode_get_channel(mode, iface->freq, &chan))
 				continue;
+
 			iface->current_mode = mode;
 			break;
 		}
