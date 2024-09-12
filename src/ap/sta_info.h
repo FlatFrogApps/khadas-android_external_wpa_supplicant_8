@@ -14,6 +14,9 @@
 #include "vlan.h"
 #include "common/wpa_common.h"
 #include "common/ieee802_11_defs.h"
+#include "common/sae.h"
+#include "crypto/sha384.h"
+#include "pasn/pasn_common.h"
 
 /* STA flags */
 #define WLAN_STA_AUTH BIT(0)
@@ -39,6 +42,8 @@
 #define WLAN_STA_MULTI_AP BIT(23)
 #define WLAN_STA_HE BIT(24)
 #define WLAN_STA_6GHZ BIT(25)
+#define WLAN_STA_PENDING_PASN_FILS_ERP BIT(26)
+#define WLAN_STA_EHT BIT(27)
 #define WLAN_STA_PENDING_DISASSOC_CB BIT(29)
 #define WLAN_STA_PENDING_DEAUTH_CB BIT(30)
 #define WLAN_STA_NONERP BIT(31)
@@ -61,6 +66,7 @@ struct mbo_non_pref_chan_info {
 struct pending_eapol_rx {
 	struct wpabuf *buf;
 	struct os_reltime rx_time;
+	enum frame_encryption encrypted;
 };
 
 struct sta_info {
@@ -112,6 +118,7 @@ struct sta_info {
 	unsigned int qos_map_enabled:1;
 	unsigned int remediation:1;
 	unsigned int hs20_deauth_requested:1;
+	unsigned int hs20_deauth_on_ack:1;
 	unsigned int session_timeout_set:1;
 	unsigned int radius_das_match:1;
 	unsigned int ecsa_supported:1;
@@ -122,6 +129,7 @@ struct sta_info {
 	unsigned int hs20_t_c_filtering:1;
 	unsigned int ft_over_ds:1;
 	unsigned int external_dh_updated:1;
+	unsigned int post_csa_sa_query:1;
 
 	u16 auth_alg;
 
@@ -172,6 +180,8 @@ struct sta_info {
 	struct ieee80211_he_capabilities *he_capab;
 	size_t he_capab_len;
 	struct ieee80211_he_6ghz_band_cap *he_6ghz_capab;
+	struct ieee80211_eht_capabilities *eht_capab;
+	size_t eht_capab_len;
 
 	int sa_query_count; /* number of pending SA Query requests;
 			     * 0 = no SA Query in progress */
@@ -285,6 +295,10 @@ struct sta_info {
 	unsigned int airtime_weight;
 	struct os_reltime backlogged_until;
 #endif /* CONFIG_AIRTIME_POLICY */
+
+#ifdef CONFIG_PASN
+	struct pasn_data *pasn;
+#endif /* CONFIG_PASN */
 };
 
 
@@ -340,6 +354,8 @@ void ap_sta_stop_sa_query(struct hostapd_data *hapd, struct sta_info *sta);
 int ap_check_sa_query_timeout(struct hostapd_data *hapd, struct sta_info *sta);
 const char * ap_sta_wpa_get_keyid(struct hostapd_data *hapd,
 				  struct sta_info *sta);
+const u8 * ap_sta_wpa_get_dpp_pkhash(struct hostapd_data *hapd,
+				     struct sta_info *sta);
 void ap_sta_disconnect(struct hostapd_data *hapd, struct sta_info *sta,
 		       const u8 *addr, u16 reason);
 
@@ -361,5 +377,7 @@ void ap_sta_delayed_1x_auth_fail_disconnect(struct hostapd_data *hapd,
 int ap_sta_pending_delayed_1x_auth_fail_disconnect(struct hostapd_data *hapd,
 						   struct sta_info *sta);
 int ap_sta_re_add(struct hostapd_data *hapd, struct sta_info *sta);
+
+void ap_free_sta_pasn(struct hostapd_data *hapd, struct sta_info *sta);
 
 #endif /* STA_INFO_H */

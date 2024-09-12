@@ -143,7 +143,7 @@ static inline int wpa_drv_get_ssid(struct wpa_supplicant *wpa_s, u8 *ssid)
 	return -1;
 }
 
-static inline int wpa_drv_set_key(struct wpa_supplicant *wpa_s,
+static inline int wpa_drv_set_key(struct wpa_supplicant *wpa_s, int link_id,
 				  enum wpa_alg alg, const u8 *addr,
 				  int key_idx, int set_tx,
 				  const u8 *seq, size_t seq_len,
@@ -163,6 +163,7 @@ static inline int wpa_drv_set_key(struct wpa_supplicant *wpa_s,
 	params.key = key;
 	params.key_len = key_len;
 	params.key_flag = key_flag;
+	params.link_id = link_id;
 
 	if (alg != WPA_ALG_NONE) {
 		/* keyidx = 1 can be either a broadcast or--with
@@ -349,8 +350,11 @@ static inline int wpa_drv_set_ap(struct wpa_supplicant *wpa_s,
 static inline int wpa_drv_sta_add(struct wpa_supplicant *wpa_s,
 				  struct hostapd_sta_add_params *params)
 {
-	if (wpa_s->driver->sta_add)
+	if (wpa_s->driver->sta_add) {
+		/* Set link_id to -1 as it's needed for AP only */
+		params->mld_link_id = -1;
 		return wpa_s->driver->sta_add(wpa_s->drv_priv, params);
+	}
 	return -1;
 }
 
@@ -406,20 +410,10 @@ static inline int wpa_drv_set_supp_port(struct wpa_supplicant *wpa_s,
 	return 0;
 }
 
-static inline int wpa_drv_send_action(struct wpa_supplicant *wpa_s,
-				      unsigned int freq,
-				      unsigned int wait,
-				      const u8 *dst, const u8 *src,
-				      const u8 *bssid,
-				      const u8 *data, size_t data_len,
-				      int no_cck)
-{
-	if (wpa_s->driver->send_action)
-		return wpa_s->driver->send_action(wpa_s->drv_priv, freq,
-						  wait, dst, src, bssid,
-						  data, data_len, no_cck);
-	return -1;
-}
+int wpa_drv_send_action(struct wpa_supplicant *wpa_s, unsigned int freq,
+			unsigned int wait, const u8 *dst, const u8 *src,
+			const u8 *bssid, const u8 *data, size_t data_len,
+			int no_cck);
 
 static inline void wpa_drv_send_action_cancel_wait(struct wpa_supplicant *wpa_s)
 {
@@ -522,6 +516,14 @@ static inline int wpa_drv_signal_monitor(struct wpa_supplicant *wpa_s,
 
 int wpa_drv_signal_poll(struct wpa_supplicant *wpa_s,
 			struct wpa_signal_info *si);
+
+static inline int wpa_drv_mlo_signal_poll(struct wpa_supplicant *wpa_s,
+					  struct wpa_mlo_signal_info *mlo_si)
+{
+	if (wpa_s->driver->mlo_signal_poll)
+		return wpa_s->driver->mlo_signal_poll(wpa_s->drv_priv, mlo_si);
+	return -1;
+}
 
 static inline int wpa_drv_channel_info(struct wpa_supplicant *wpa_s,
 				       struct wpa_channel_info *ci)
@@ -719,12 +721,14 @@ static inline int wpa_drv_wowlan(struct wpa_supplicant *wpa_s,
 
 static inline int wpa_drv_vendor_cmd(struct wpa_supplicant *wpa_s,
 				     int vendor_id, int subcmd, const u8 *data,
-				     size_t data_len, struct wpabuf *buf)
+				     size_t data_len,
+				     enum nested_attr nested_attr_flag,
+				     struct wpabuf *buf)
 {
 	if (!wpa_s->driver->vendor_cmd)
 		return -1;
 	return wpa_s->driver->vendor_cmd(wpa_s->drv_priv, vendor_id, subcmd,
-					 data, data_len, buf);
+					 data, data_len, nested_attr_flag, buf);
 }
 
 static inline int wpa_drv_roaming(struct wpa_supplicant *wpa_s, int allowed,
@@ -800,6 +804,14 @@ static inline int wpa_drv_set_replay_protect(struct wpa_supplicant *wpa_s,
 		return -1;
 	return wpa_s->driver->set_replay_protect(wpa_s->drv_priv, enabled,
 						 window);
+}
+
+static inline int wpa_drv_set_offload(struct wpa_supplicant *wpa_s, u8 offload)
+{
+	if (!wpa_s->driver->set_offload)
+		return -1;
+	return wpa_s->driver->set_offload(wpa_s->drv_priv, offload);
+
 }
 
 static inline int wpa_drv_set_current_cipher_suite(struct wpa_supplicant *wpa_s,
@@ -952,17 +964,17 @@ static inline int wpa_drv_disable_transmit_sa(struct wpa_supplicant *wpa_s,
 #endif /* CONFIG_MACSEC */
 
 static inline int wpa_drv_setband(struct wpa_supplicant *wpa_s,
-				  enum set_band band)
+				  u32 band_mask)
 {
 	if (!wpa_s->driver->set_band)
 		return -1;
-	return wpa_s->driver->set_band(wpa_s->drv_priv, band);
+	return wpa_s->driver->set_band(wpa_s->drv_priv, band_mask);
 }
 
 static inline int wpa_drv_get_pref_freq_list(struct wpa_supplicant *wpa_s,
 					     enum wpa_driver_if_type if_type,
 					     unsigned int *num,
-					     unsigned int *freq_list)
+					     struct weighted_pcl *freq_list)
 {
 #ifdef CONFIG_TESTING_OPTIONS
 	if (wpa_s->get_pref_freq_list_override)
@@ -1069,14 +1081,14 @@ static inline int wpa_drv_ignore_assoc_disallow(struct wpa_supplicant *wpa_s,
 	return wpa_s->driver->ignore_assoc_disallow(wpa_s->drv_priv, val);
 }
 
-static inline int wpa_drv_set_bssid_blacklist(struct wpa_supplicant *wpa_s,
-					      unsigned int num_bssid,
-					      const u8 *bssids)
+static inline int wpa_drv_set_bssid_tmp_disallow(struct wpa_supplicant *wpa_s,
+						 unsigned int num_bssid,
+						 const u8 *bssids)
 {
-	if (!wpa_s->driver->set_bssid_blacklist)
+	if (!wpa_s->driver->set_bssid_tmp_disallow)
 		return -1;
-	return wpa_s->driver->set_bssid_blacklist(wpa_s->drv_priv, num_bssid,
-						  bssids);
+	return wpa_s->driver->set_bssid_tmp_disallow(wpa_s->drv_priv, num_bssid,
+						     bssids);
 }
 
 static inline int wpa_drv_update_connect_params(
@@ -1113,6 +1125,51 @@ static inline int wpa_drv_dpp_listen(struct wpa_supplicant *wpa_s, bool enable)
 	if (!wpa_s->driver->dpp_listen)
 		return 0;
 	return wpa_s->driver->dpp_listen(wpa_s->drv_priv, enable);
+}
+
+static inline int wpa_drv_send_pasn_resp(struct wpa_supplicant *wpa_s,
+					 struct pasn_auth *params)
+{
+	if (!wpa_s->driver->send_pasn_resp)
+		return -1;
+	return wpa_s->driver->send_pasn_resp(wpa_s->drv_priv, params);
+}
+
+static inline int wpa_drv_set_secure_ranging_ctx(struct wpa_supplicant *wpa_s,
+						 const u8 *own_addr,
+						 const u8 *peer_addr,
+						 u32 cipher, u8 tk_len,
+						 const u8 *tk,
+						 u8 ltf_keyseed_len,
+						 const u8 *ltf_keyseed,
+						 u32 action)
+{
+	struct secure_ranging_params params;
+
+	if (!wpa_s->driver->set_secure_ranging_ctx)
+		return -1;
+
+	os_memset(&params, 0, sizeof(params));
+	params.action = action;
+	params.own_addr = own_addr;
+	params.peer_addr = peer_addr;
+	params.cipher = cipher;
+	params.tk_len = tk_len;
+	params.tk = tk;
+	params.ltf_keyseed_len = ltf_keyseed_len;
+	params.ltf_keyseed = ltf_keyseed;
+
+	return wpa_s->driver->set_secure_ranging_ctx(wpa_s->drv_priv, &params);
+}
+
+static inline int
+wpas_drv_get_sta_mlo_info(struct wpa_supplicant *wpa_s,
+			  struct driver_sta_mlo_info *mlo_info)
+{
+	if (!wpa_s->driver->get_sta_mlo_info)
+		return 0;
+
+	return wpa_s->driver->get_sta_mlo_info(wpa_s->drv_priv, mlo_info);
 }
 
 #endif /* DRIVER_I_H */

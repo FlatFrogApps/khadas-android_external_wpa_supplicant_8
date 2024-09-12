@@ -191,8 +191,12 @@ static int wpa_gen_wpa_ie_rsn(u8 *rsn_ie, size_t rsn_ie_len,
 #ifdef CONFIG_SAE
 	} else if (key_mgmt == WPA_KEY_MGMT_SAE) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_SAE);
+	} else if (key_mgmt == WPA_KEY_MGMT_SAE_EXT_KEY) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_SAE_EXT_KEY);
 	} else if (key_mgmt == WPA_KEY_MGMT_FT_SAE) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE);
+	} else if (key_mgmt == WPA_KEY_MGMT_FT_SAE_EXT_KEY) {
+		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_FT_SAE_EXT_KEY);
 #endif /* CONFIG_SAE */
 	} else if (key_mgmt == WPA_KEY_MGMT_IEEE8021X_SUITE_B_192) {
 		RSN_SELECTOR_PUT(pos, RSN_AUTH_KEY_MGMT_802_1X_SUITE_B_192);
@@ -354,20 +358,39 @@ int wpa_gen_wpa_ie(struct wpa_sm *sm, u8 *wpa_ie, size_t wpa_ie_len)
 int wpa_gen_rsnxe(struct wpa_sm *sm, u8 *rsnxe, size_t rsnxe_len)
 {
 	u8 *pos = rsnxe;
+	u16 capab = 0;
+	size_t flen;
 
-	if (!wpa_key_mgmt_sae(sm->key_mgmt))
-		return 0; /* SAE not in use */
-	if (sm->sae_pwe != 1 && sm->sae_pwe != 2)
+	if (wpa_key_mgmt_sae(sm->key_mgmt) &&
+	    (sm->sae_pwe == SAE_PWE_HASH_TO_ELEMENT ||
+	     sm->sae_pwe == SAE_PWE_BOTH || sm->sae_pk)) {
+		capab |= BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+#ifdef CONFIG_SAE_PK
+		if (sm->sae_pk)
+			capab |= BIT(WLAN_RSNX_CAPAB_SAE_PK);
+#endif /* CONFIG_SAE_PK */
+	}
+
+	if (sm->secure_ltf)
+		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_LTF);
+	if (sm->secure_rtt)
+		capab |= BIT(WLAN_RSNX_CAPAB_SECURE_RTT);
+	if (sm->prot_range_neg)
+		capab |= BIT(WLAN_RSNX_CAPAB_URNM_MFPR);
+
+	flen = (capab & 0xff00) ? 2 : 1;
+	if (!capab)
 		return 0; /* no supported extended RSN capabilities */
-
-	if (rsnxe_len < 3)
+	if (rsnxe_len < 2 + flen)
 		return -1;
+	capab |= flen - 1; /* bit 0-3 = Field length (n - 1) */
 
 	*pos++ = WLAN_EID_RSNX;
-	*pos++ = 1;
-	/* bits 0-3 = 0 since only one octet of Extended RSN Capabilities is
-	 * used for now */
-	*pos++ = BIT(WLAN_RSNX_CAPAB_SAE_H2E);
+	*pos++ = flen;
+	*pos++ = capab & 0x00ff;
+	capab >>= 8;
+	if (capab)
+		*pos++ = capab;
 
 	return pos - rsnxe;
 }

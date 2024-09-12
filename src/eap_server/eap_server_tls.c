@@ -1,5 +1,5 @@
 /*
- * hostapd / EAP-TLS (RFC 2716)
+ * hostapd / EAP-TLS (RFC 5216, RFC 9190)
  * Copyright (c) 2004-2008, Jouni Malinen <j@w1.fi>
  *
  * This software may be distributed under the terms of the BSD license.
@@ -266,39 +266,6 @@ static void eap_tls_process_msg(struct eap_sm *sm, void *priv,
 		eap_tls_state(data, FAILURE);
 		return;
 	}
-
-	if (data->ssl.tls_v13 &&
-	    tls_connection_established(sm->cfg->ssl_ctx, data->ssl.conn)) {
-		struct wpabuf *plain, *encr;
-
-		wpa_printf(MSG_DEBUG,
-			   "EAP-TLS: Send empty application data to indicate end of exchange");
-		/* FIX: This should be an empty application data based on
-		 * draft-ietf-emu-eap-tls13-05, but OpenSSL does not allow zero
-		 * length payload (SSL_write() documentation explicitly
-		 * describes this as not allowed), so work around that for now
-		 * by sending out a payload of one octet. Hopefully the draft
-		 * specification will change to allow this so that no crypto
-		 * library changes are needed. */
-		plain = wpabuf_alloc(1);
-		if (!plain)
-			return;
-		wpabuf_put_u8(plain, 0);
-		encr = eap_server_tls_encrypt(sm, &data->ssl, plain);
-		wpabuf_free(plain);
-		if (!encr)
-			return;
-		if (wpabuf_resize(&data->ssl.tls_out, wpabuf_len(encr)) < 0) {
-			wpa_printf(MSG_INFO,
-				   "EAP-TLS: Failed to resize output buffer");
-			wpabuf_free(encr);
-			return;
-		}
-		wpabuf_put_buf(data->ssl.tls_out, encr);
-		wpa_hexdump_buf(MSG_DEBUG,
-				"EAP-TLS: Data appended to the message", encr);
-		wpabuf_free(encr);
-	}
 }
 
 
@@ -339,6 +306,14 @@ static void eap_tls_process(struct eap_sm *sm, void *priv,
 
 	wpa_printf(MSG_DEBUG,
 		   "EAP-TLS: Resuming previous session");
+
+	if (data->ssl.tls_v13 && data->ssl.tls_out) {
+		wpa_hexdump_buf(MSG_DEBUG,
+				"EAP-TLS: Additional data to be sent for TLS 1.3",
+				data->ssl.tls_out);
+		return;
+	}
+
 	eap_tls_state(data, SUCCESS);
 	tls_connection_set_success_data_resumed(data->ssl.conn);
 	/* TODO: Cache serial number with session and update EAP user
